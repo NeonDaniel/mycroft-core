@@ -29,6 +29,7 @@ from copy import copy
 
 class _MetricSender(threading.Thread):
     """Thread responsible for sending metrics data."""
+
     def __init__(self):
         super().__init__()
         self.queue = Queue()
@@ -61,7 +62,7 @@ def report_metric(name, data):
         data (dict): JSON dictionary to report. Must be valid JSON
     """
     try:
-        if is_paired() and Configuration().get()['opt_in']:
+        if is_paired() and Configuration().get('opt_in', False):
             DeviceApi().report_metric(name, data)
     except requests.RequestException as e:
         LOG.error('Metric couldn\'t be uploaded, due to a network error ({})'
@@ -71,7 +72,7 @@ def report_metric(name, data):
 def report_timing(ident, system, timing, additional_data=None):
     """Create standardized message for reporting timing.
 
-    Arguments:
+    Args:
         ident (str):            identifier of user interaction
         system (str):           system the that's generated the report
         timing (stopwatch):     Stopwatch object with recorded timing
@@ -91,6 +92,7 @@ class Stopwatch:
     """
         Simple time measuring class.
     """
+
     def __init__(self):
         self.timestamp = None
         self.time = None
@@ -195,9 +197,9 @@ class MetricsAggregator:
 
 class MetricsPublisher:
     def __init__(self, url=None, enabled=False):
-        conf = Configuration().get()['server']
-        self.url = url or conf['url']
-        self.enabled = enabled or conf['metrics']
+        conf = Configuration().get('server') or {}
+        self.url = url or conf.get('url')
+        self.enabled = enabled or conf.get('metrics', False)
 
     def publish(self, events):
         if 'session_id' not in events:

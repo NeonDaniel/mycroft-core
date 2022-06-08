@@ -12,25 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import re
 import time
 from threading import Lock
 
 from mycroft.configuration import Configuration
 from mycroft.metrics import report_timing, Stopwatch
-from mycroft.tts import TTSFactory
+from mycroft.audio.tts import TTSFactory, TTS, RemoteTTSException
 from mycroft.util import check_for_signal
 from mycroft.util.log import LOG
 from mycroft.messagebus.message import Message
-from mycroft.tts.remote_tts import RemoteTTSException
-from mycroft.tts.mimic_tts import Mimic
 
 bus = None  # Mycroft messagebus connection
-config = None
 tts = None
 tts_hash = None
 lock = Lock()
-mimic_fallback_obj = None
+fallback_tts = None
+fallback_tts_hash = None
 
 _last_stop_signal = 0
 
@@ -40,12 +37,10 @@ def handle_speak(event):
 
     Parse sentences and invoke text to speech service.
     """
-    config = Configuration.get()
-    Configuration.set_config_update_handlers(bus)
-    global _last_stop_signal
+    global _last_stop_signal, tts
 
     # if the message is targeted and audio is not the target don't
-    # don't synthezise speech
+    # don't synthesise speech
     event.context = event.context or {}
     if event.context.get('destination') and not \
             ('debug_cli' in event.context['destination'] or
@@ -58,108 +53,103 @@ def handle_speak(event):
     else:
         ident = 'unknown'
 
-    start = time.time()  # Time of speech request
     with lock:
         stopwatch = Stopwatch()
         stopwatch.start()
+
         utterance = event.data['utterance']
         listen = event.data.get('expect_response', False)
-        # This is a bit of a hack for Picroft.  The analog audio on a Pi blocks
-        # for 30 seconds fairly often, so we don't want to break on periods
-        # (decreasing the chance of encountering the block).  But we will
-        # keep the split for non-Picroft installs since it give user feedback
-        # faster on longer phrases.
-        #
-        # TODO: Remove or make an option?  This is really a hack, anyway,
-        # so we likely will want to get rid of this when not running on Mimic
-        if (config.get('enclosure', {}).get('platform') != "picroft" and
-                len(re.findall('<[^>]*>', utterance)) == 0):
-            # Remove any whitespace present after the period,
-            # if a character (only alpha) ends with a period
-            # ex: A. Lincoln -> A.Lincoln
-            # so that we don't split at the period
-            utterance = re.sub(r'\b([A-za-z][\.])(\s+)', r'\g<1>', utterance)
-            chunks = re.split(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\;|\?)\s',
-                              utterance)
-            # Apply the listen flag to the last chunk, set the rest to False
-            chunks = [(chunks[i], listen if i == len(chunks) - 1 else False)
-                      for i in range(len(chunks))]
-            for chunk, listen in chunks:
-                # Check if somthing has aborted the speech
-                if (_last_stop_signal > start or
-                        check_for_signal('buttonPress')):
-                    # Clear any newly queued speech
-                    tts.playback.clear()
-                    break
-                try:
-                    mute_and_speak(chunk, ident, listen)
-                except KeyboardInterrupt:
-                    raise
-                except Exception:
-                    LOG.error('Error in mute_and_speak', exc_info=True)
-        else:
-            mute_and_speak(utterance, ident, listen)
+        mute_and_speak(utterance, ident, listen)
 
         stopwatch.stop()
-    report_timing(ident, 'speech', stopwatch, {'utterance': utterance,
-                                               'tts': tts.__class__.__name__})
+
+    report_timing(ident, 'speech', stopwatch,
+                  {'utterance': utterance, 'tts': tts.__class__.__name__})
+
+
+def _maybe_reload_tts():
+    global tts, tts_hash, fallback_tts, fallback_tts_hash
+    config = Configuration().get("tts", {})
+
+    # update TTS object if configuration has changed
+    if not tts_hash or tts_hash != config.get("module", ""):
+        if tts:
+            tts.shutdown()
+        # Create new tts instance
+        LOG.info("(re)loading TTS engine")
+        tts = TTSFactory.create(config)
+        tts.init(bus)
+        tts_hash = config.get("module", "")
+
+    # if fallback TTS is the same as main TTS dont load it
+    if config.get("module", "") == config.get("fallback_module", ""):
+        return
+
+    if not fallback_tts_hash or \
+            fallback_tts_hash != config.get("fallback_module", ""):
+        if fallback_tts:
+            fallback_tts.shutdown()
+        # Create new tts instance
+        LOG.info("(re)loading fallback TTS engine")
+        _get_tts_fallback()
+        fallback_tts_hash = config.get("fallback_module", "")
 
 
 def mute_and_speak(utterance, ident, listen=False):
     """Mute mic and start speaking the utterance using selected tts backend.
 
-    Arguments:
+    Args:
         utterance:  The sentence to be spoken
         ident:      Ident tying the utterance to the source query
     """
-    global tts_hash
-    # update TTS object if configuration has changed
-    if tts_hash != hash(str(config.get('tts', ''))):
-        global tts
-        # Stop tts playback thread
-        tts.playback.stop()
-        tts.playback.join()
-        # Create new tts instance
-        tts = TTSFactory.create()
-        tts.init(bus)
-        tts_hash = hash(str(config.get('tts', '')))
-
     LOG.info("Speak: " + utterance)
     try:
         tts.execute(utterance, ident, listen)
-    except RemoteTTSException as e:
-        LOG.error(e)
-        mimic_fallback_tts(utterance, ident, listen)
-    except Exception:
-        LOG.exception('TTS execution failed.')
+    except Exception as e:
+        LOG.exception("TTS synth failed!")
+        if tts_hash != fallback_tts_hash:
+            execute_fallback_tts(utterance, ident, listen)
 
 
-def _get_mimic_fallback():
+def _get_tts_fallback():
     """Lazily initializes the fallback TTS if needed."""
-    global mimic_fallback_obj
-    if not mimic_fallback_obj:
-        config = Configuration.get()
-        tts_config = config.get('tts', {}).get("mimic", {})
-        lang = config.get("lang", "en-us")
-        tts = Mimic(lang, tts_config)
-        tts.validator.validate()
-        tts.init(bus)
-        mimic_fallback_obj = tts
+    global fallback_tts, bus
+    if not fallback_tts:
+        config = Configuration()
+        engine = config.get('tts', {}).get("fallback_module", "mimic")
+        cfg = {"tts": {"module": engine,
+                       engine: config.get('tts', {}).get(engine, {})}}
+        fallback_tts = TTSFactory.create(cfg)
+        fallback_tts.validator.validate()
+        fallback_tts.init(bus)
 
-    return mimic_fallback_obj
+    return fallback_tts
 
 
-def mimic_fallback_tts(utterance, ident, listen):
+def execute_fallback_tts(utterance, ident, listen):
     """Speak utterance using fallback TTS if connection is lost.
 
-    Arguments:
+    Args:
         utterance (str): sentence to speak
         ident (str): interaction id for metrics
         listen (bool): True if interaction should end with mycroft listening
     """
-    tts = _get_mimic_fallback()
-    LOG.debug("Mimic fallback, utterance : " + str(utterance))
-    tts.execute(utterance, ident, listen)
+    try:
+        tts = _get_tts_fallback()
+        LOG.debug("TTS fallback, utterance : " + str(utterance))
+        tts.execute(utterance, ident, listen)
+        return
+    except Exception as e:
+        LOG.exception("TTS FAILURE! utterance : " + str(utterance))
+
+
+def mimic_fallback_tts(utterance, ident, listen):
+    """
+    DEPRECATED: use execute_fallback_tts instead
+    This method is only kept around for backwards api compat
+    """
+    LOG.warning("mimic_fallback_tts is deprecated! use execute_fallback_tts instead")
+    execute_fallback_tts(utterance, ident=ident, listen=listen)
 
 
 def handle_stop(event):
@@ -177,25 +167,20 @@ def handle_stop(event):
 def init(messagebus):
     """Start speech related handlers.
 
-    Arguments:
+    Args:
         messagebus: Connection to the Mycroft messagebus
     """
-
     global bus
-    global tts
-    global tts_hash
-    global config
 
     bus = messagebus
     Configuration.set_config_update_handlers(bus)
-    config = Configuration.get()
+
     bus.on('mycroft.stop', handle_stop)
     bus.on('mycroft.audio.speech.stop', handle_stop)
     bus.on('speak', handle_speak)
 
-    tts = TTSFactory.create()
-    tts.init(bus)
-    tts_hash = hash(str(config.get('tts', '')))
+    _maybe_reload_tts()
+    Configuration.set_config_watcher(_maybe_reload_tts)
 
 
 def shutdown():
@@ -203,9 +188,6 @@ def shutdown():
 
     Stop any playing audio and make sure threads are joined correctly.
     """
-    if tts:
-        tts.playback.stop()
-        tts.playback.join()
-    if mimic_fallback_obj:
-        mimic_fallback_obj.playback.stop()
-        mimic_fallback_obj.playback.join()
+    if TTS.playback:
+        TTS.playback.shutdown()
+        TTS.playback.join()

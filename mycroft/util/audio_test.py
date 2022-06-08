@@ -19,11 +19,12 @@ from contextlib import contextmanager
 
 from speech_recognition import Recognizer
 
-from mycroft.client.speech.mic import MutableMicrophone
+from mycroft.listener.mic import MutableMicrophone
 from mycroft.configuration import Configuration
 from mycroft.util.audio_utils import play_wav
 from mycroft.util.log import LOG
 import logging
+from mycroft.util.file_utils import get_temp_path
 
 """
 Audio Test
@@ -72,8 +73,12 @@ def record(filename, duration):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        '-f', '--filename', dest='filename', default="/tmp/test.wav",
-        help="Filename for saved audio (Default: /tmp/test.wav)")
+        '-f',
+        '--filename',
+        dest='filename',
+        default=get_temp_path('test.wav'),
+        help="Filename for saved audio (Default:{}".format(
+            get_temp_path('test.wav')))
     parser.add_argument(
         '-d', '--duration', dest='duration', type=int, default=10,
         help="Duration of recording in seconds (Default: 10)")
@@ -97,7 +102,7 @@ def main():
                 print('   {}:       {}'.format(device_index, dev['name']))
         print()
 
-    config = Configuration.get()
+    config = Configuration()
     if "device_name" in config["listener"]:
         dev = config["listener"]["device_name"]
     elif "device_index" in config["listener"]:

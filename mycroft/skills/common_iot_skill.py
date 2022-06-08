@@ -24,7 +24,7 @@ from enum import Enum, unique
 from functools import total_ordering, wraps
 from itertools import count
 
-from .mycroft_skill import MycroftSkill
+from mycroft.skills.mycroft_skill import MycroftSkill
 from mycroft.messagebus.message import Message, dig_for_message
 
 ENTITY = "ENTITY"
@@ -404,6 +404,7 @@ class CommonIoTSkill(MycroftSkill, ABC):
         if can_handle:
             data.update({"skill_id": self.skill_id,
                          "callback_data": callback_data})
+            message.context["skill_id"] = self.skill_id
             self.bus.emit(message.response(data))
 
     @_track_request
@@ -423,6 +424,7 @@ class CommonIoTSkill(MycroftSkill, ABC):
     def speak(self, utterance, *args, **kwargs):
         if self._current_iot_request:
             message = dig_for_message()
+            message.context["skill_id"] = self.skill_id
             self.bus.emit(message.forward(_BusKeys.SPEAK,
                                           data={"skill_id": self.skill_id,
                                                 IOT_REQUEST_ID:
@@ -459,7 +461,8 @@ class CommonIoTSkill(MycroftSkill, ABC):
             self.bus.emit(Message(_BusKeys.REGISTER,
                                   data={"skill_id": self.skill_id,
                                         "type": word_type,
-                                        "words": list(words)}))
+                                        "words": list(words)},
+                                  context={"skill_id": self.skill_id}))
 
     def register_entities_and_scenes(self):
         """
@@ -528,8 +531,8 @@ class CommonIoTSkill(MycroftSkill, ABC):
         An IoTRequest contains several properties (see the
         documentation for that class). This method should return
         True if and only if this skill can take the appropriate
-        'action' when considering _all other properties
-        of the request_. In other words, a partial match, one in which
+        'action' when considering all other properties
+        of the request. In other words, a partial match, one in which
         any piece of the IoTRequest is not known to this skill,
         and is not None, this should return (False, None).
 

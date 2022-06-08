@@ -1,21 +1,20 @@
 from inspect import signature
 
-from mycroft.messagebus.message import Message
 from mycroft.metrics import Stopwatch, report_timing
 from mycroft.util.log import LOG
 
-from ..skill_data import to_alnum
+from mycroft.skills.skill_data import to_alnum
 
 
 def unmunge_message(message, skill_id):
     """Restore message keywords by removing the Letterified skill ID.
-    Arguments:
+    Args:
         message (Message): Intent result message
         skill_id (str): skill identifier
     Returns:
         Message without clear keywords
     """
-    if isinstance(message, Message) and isinstance(message.data, dict):
+    if hasattr(message, "data") and isinstance(message.data, dict):
         skill_id = to_alnum(skill_id)
         for key in list(message.data.keys()):
             if key.startswith(skill_id):
@@ -29,7 +28,7 @@ def unmunge_message(message, skill_id):
 def get_handler_name(handler):
     """Name (including class if available) of handler function.
 
-    Arguments:
+    Args:
         handler (function): Function to be named
 
     Returns:
@@ -52,6 +51,7 @@ def create_wrapper(handler, skill_id, on_start, on_end, on_error):
         on_end (function): function to call after executing the handler
         on_error (function): function to call for error reporting
     """
+
     def wrapper(message):
         stopwatch = Stopwatch()
         try:
@@ -67,7 +67,10 @@ def create_wrapper(handler, skill_id, on_start, on_end, on_error):
 
         except Exception as e:
             if on_error:
-                on_error(e)
+                if len(signature(on_error).parameters) == 2:
+                    on_error(e, message)
+                else:
+                    on_error(e)
         finally:
             if on_end:
                 on_end(message)
@@ -78,6 +81,7 @@ def create_wrapper(handler, skill_id, on_start, on_end, on_error):
                 report_timing(context['ident'], 'skill_handler', stopwatch,
                               {'handler': handler.__name__,
                                'skill_id': skill_id})
+
     return wrapper
 
 
@@ -87,13 +91,14 @@ def create_basic_wrapper(handler, on_error=None):
     This wrapper handles things like metrics, reporting handler start/stop
     and errors.
 
-    Arguments:
+    Args:
         handler (callable): method/function to call
         on_error (function): function to call to report error.
 
     Returns:
         Wrapped callable
     """
+
     def wrapper(message):
         try:
             if len(signature(handler).parameters) == 0:
@@ -113,6 +118,7 @@ class EventContainer:
     This container tracks events added by a skill, allowing unregistering
     all events on shutdown.
     """
+
     def __init__(self, bus=None):
         self.bus = bus
         self.events = []
@@ -123,12 +129,13 @@ class EventContainer:
     def add(self, name, handler, once=False):
         """Create event handler for executing intent or other event.
 
-        Arguments:
+        Args:
             name (string): IntentParser name
             handler (func): Method to call
             once (bool, optional): Event handler will be removed after it has
                                    been run once.
         """
+
         def once_wrapper(message):
             # Remove registered one-time handler before invoking,
             # allowing them to re-schedule themselves.

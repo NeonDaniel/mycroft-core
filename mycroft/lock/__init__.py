@@ -14,14 +14,14 @@
 #
 from signal import getsignal, signal, SIGKILL, SIGINT, SIGTERM, \
     SIG_DFL, default_int_handler, SIG_IGN  # signals
-
+from ovos_utils.configuration import get_xdg_base
 import os  # Operating System functions
-
 
 #
 # Wrapper around chain of handler functions for a specific system level signal.
 # Often used to trap Ctrl-C for specific application purposes.
 from mycroft.util import LOG
+from mycroft.util.file_utils import get_temp_path
 
 
 class Signal:  # python 3+ class Signal
@@ -98,7 +98,7 @@ class Lock:  # python 3+ 'class Lock'
 
     #
     # Class constants
-    DIRECTORY = '/tmp/mycroft'
+    DIRECTORY = get_temp_path(get_xdg_base())
     FILE = '/{}.pid'
 
     #

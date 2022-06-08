@@ -18,14 +18,10 @@ from copy import copy, deepcopy
 
 import requests
 from requests import HTTPError, RequestException
-
-from mycroft.configuration import Configuration
-from mycroft.configuration.config import DEFAULT_CONFIG, SYSTEM_CONFIG, \
-    USER_CONFIG
+import mycroft.configuration
 from mycroft.identity import IdentityManager, identity_lock
-from mycroft.version import VersionManager
+from mycroft.version import VersionManager, OVOS_VERSION_STR
 from mycroft.util import get_arch, connected, LOG
-
 
 _paired_cache = False
 
@@ -49,16 +45,14 @@ class Api:
     def __init__(self, path):
         self.path = path
 
-        # Load the config, skipping the REMOTE_CONFIG since we are
+        # Load the config, skipping the remote config since we are
         # getting the info needed to get to it!
-        config = Configuration.get([DEFAULT_CONFIG,
-                                    SYSTEM_CONFIG,
-                                    USER_CONFIG],
-                                   cache=False)
-        config_server = config.get("server")
+        config = mycroft.configuration.Configuration()
+        config_server = config.get("server") or {}
         self.url = config_server.get("url")
         self.version = config_server.get("version")
         self.identity = IdentityManager.get()
+        self.disabled = is_backend_disabled()
 
     def request(self, params):
         self.check_token()
@@ -66,7 +60,7 @@ class Api:
             params['path'] = params['path'].replace(UUID, self.identity.uuid)
         self.build_path(params)
         self.old_params = copy(params)
-        return self.send(params)
+        return self.send(params) or {}
 
     def check_token(self):
         # If the identity hasn't been loaded, load it
@@ -113,13 +107,15 @@ class Api:
         The method handles Etags and will return a cached response value
         if nothing has changed on the remote.
 
-        Arguments:
+        Args:
             params (dict): request parameters
             no_refresh (bool): optional parameter to disable refreshs of token
 
         Returns:
             Requests response object.
         """
+        if self.disabled:
+            return {}
         query_data = frozenset(params.get('query', {}).items())
         params_key = (params.get('path'), query_data)
         etag = self.params_to_etag.get(params_key)
@@ -156,19 +152,23 @@ class Api:
 
         Will try to refresh the access token if it's expired.
 
-        Arguments:
+        Args:
             response (requests Response object): Response to parse
             no_refresh (bool): Disable refreshing of the token
+
         Returns:
             data fetched from server
         """
+        if self.disabled:
+            return {}
         data = self.get_data(response)
 
         if 200 <= response.status_code < 300:
             return data
-        elif (not no_refresh and response.status_code == 401 and not
-                response.url.endswith("auth/token") and
-                self.identity.is_expired()):
+        elif all([not no_refresh,
+                  response.status_code == 401,
+                  not response.url.endswith("auth/token"),
+                  self.identity.is_expired()]):
             self.refresh_token()
             return self.send(self.old_params, no_refresh=True)
         raise HTTPError(data, response=response)
@@ -234,16 +234,8 @@ class DeviceApi(Api):
 
     def activate(self, state, token):
         version = VersionManager.get()
-        platform = "unknown"
-        platform_build = ""
-
-        # load just the local configs to get platform info
-        config = Configuration.get([SYSTEM_CONFIG,
-                                    USER_CONFIG],
-                                   cache=False)
-        if "enclosure" in config:
-            platform = config.get("enclosure").get("platform", "unknown")
-            platform_build = config.get("enclosure").get("platform_build", "")
+        platform = "ovos-core"
+        platform_build = OVOS_VERSION_STR
 
         return self.request({
             "method": "POST",
@@ -258,17 +250,8 @@ class DeviceApi(Api):
 
     def update_version(self):
         version = VersionManager.get()
-        platform = "unknown"
-        platform_build = ""
-
-        # load just the local configs to get platform info
-        config = Configuration.get([SYSTEM_CONFIG,
-                                    USER_CONFIG],
-                                   cache=False)
-        if "enclosure" in config:
-            platform = config.get("enclosure").get("platform", "unknown")
-            platform_build = config.get("enclosure").get("platform_build", "")
-
+        platform = "ovos-core"
+        platform_build = OVOS_VERSION_STR
         return self.request({
             "method": "PATCH",
             "path": "/" + UUID,
@@ -346,7 +329,7 @@ class DeviceApi(Api):
         arch = archs.get(get_arch())
         if arch:
             path = '/' + UUID + '/voice?arch=' + arch
-            return self.request({'path': path})['link']
+            return self.request({'path': path}).get('link')
 
     def get_oauth_token(self, dev_cred):
         """
@@ -373,7 +356,7 @@ class DeviceApi(Api):
     def upload_skill_metadata(self, settings_meta):
         """Upload skill metadata.
 
-        Arguments:
+        Args:
             settings_meta (dict): skill info and settings in JSON format
         """
         return self.request({
@@ -386,7 +369,7 @@ class DeviceApi(Api):
         """ Upload skills.json file. This file contains a manifest of installed
         and failed installations for use with the Marketplace.
 
-        Arguments:
+        Args:
              data: dictionary with skills data from msm
         """
         if not isinstance(data, dict):
@@ -422,7 +405,7 @@ class DeviceApi(Api):
             "method": "PUT",
             "path": "/" + UUID + "/skillJson",
             "json": to_send
-            })
+        })
 
 
 class STTApi(Api):
@@ -481,6 +464,8 @@ def has_been_paired():
     Returns:
         bool: True if ever paired with backend (not factory reset)
     """
+    if is_backend_disabled():
+        return True
     # This forces a load from the identity file in case the pairing state
     # has recently changed
     id = IdentityManager.load()
@@ -502,7 +487,8 @@ def is_paired(ignore_errors=True):
         # un-pairing must restart the system (or clear this value).
         # The Mark 1 does perform a restart on RESET.
         return True
-
+    if is_backend_disabled():
+        return True
     api = DeviceApi()
     _paired_cache = api.identity.uuid and check_remote_pairing(ignore_errors)
 
@@ -512,7 +498,7 @@ def is_paired(ignore_errors=True):
 def check_remote_pairing(ignore_errors):
     """Check that a basic backend endpoint accepts our pairing.
 
-    Arguments:
+    Args:
         ignore_errors (bool): True if errors should be ignored when
 
     Returns:
@@ -540,3 +526,11 @@ def check_remote_pairing(ignore_errors):
             raise InternetDown from error
     else:
         raise error
+
+
+def is_backend_disabled():
+    config = mycroft.configuration.Configuration()
+    if not config.get("server"):
+        # missing server block implies disabling backend
+        return True
+    return config["server"].get("disabled") or False

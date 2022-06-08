@@ -19,12 +19,18 @@ accessing and curating mycroft's cache.
 """
 
 import os
-import psutil
-from stat import S_ISREG, ST_MTIME, ST_MODE, ST_SIZE
-import tempfile
+import time
+from os.path import dirname
 
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+from ovos_utils.file_utils import get_temp_path
+from ovos_utils.configuration import get_xdg_base, get_xdg_data_dirs, get_xdg_data_save_path
 import mycroft.configuration
-from .log import LOG
+from mycroft.util.log import LOG
+# do not delete these imports, here for backwards compat!
+from ovos_plugin_manager.utils.tts_cache import curate_cache, mb_to_bytes
 
 
 def resolve_resource_file(res_name):
@@ -33,38 +39,51 @@ def resolve_resource_file(res_name):
     Resource names are in the form: 'filename.ext'
     or 'path/filename.ext'
 
-    The system wil look for ~/.mycroft/res_name first, and
-    if not found will look at /opt/mycroft/res_name,
-    then finally it will look for res_name in the 'mycroft/res'
-    folder of the source code package.
+    The system wil look for $XDG_DATA_DIRS/mycroft/res_name first
+    (defaults to ~/.local/share/mycroft/res_name), and if not found will
+    look at /opt/mycroft/res_name, then finally it will look for res_name
+    in the 'mycroft/res' folder of the source code package.
 
     Example:
-    With mycroft running as the user 'bob', if you called
-        resolve_resource_file('snd/beep.wav')
-    it would return either '/home/bob/.mycroft/snd/beep.wav' or
-    '/opt/mycroft/snd/beep.wav' or '.../mycroft/res/snd/beep.wav',
-    where the '...' is replaced by the path where the package has
-    been installed.
+        With mycroft running as the user 'bob', if you called
+        ``resolve_resource_file('snd/beep.wav')``
+        it would return either:
+        '$XDG_DATA_DIRS/mycroft/beep.wav',
+        '/home/bob/.mycroft/snd/beep.wav' or
+        '/opt/mycroft/snd/beep.wav' or
+        '.../mycroft/res/snd/beep.wav'
+        where the '...' is replaced by the path
+        where the package has been installed.
 
-    Arguments:
+    Args:
         res_name (str): a resource path/name
+
     Returns:
         (str) path to resource or None if no resource found
     """
-    config = mycroft.configuration.Configuration.get()
+    config = mycroft.configuration.Configuration()
 
     # First look for fully qualified file (e.g. a user setting)
     if os.path.isfile(res_name):
         return res_name
 
-    # Now look for ~/.mycroft/res_name (in user folder)
-    filename = os.path.expanduser("~/.mycroft/" + res_name)
+    # Now look for XDG_DATA_DIRS
+    for path in get_xdg_data_dirs():
+        filename = os.path.join(path, res_name)
+        if os.path.isfile(filename):
+            return filename
+
+    # Now look in the old user location
+    filename = os.path.join(os.path.expanduser('~'),
+                            f'.{get_xdg_base()}',
+                            res_name)
     if os.path.isfile(filename):
         return filename
 
     # Next look for /opt/mycroft/res/res_name
-    data_dir = os.path.join(os.path.expanduser(config['data_dir']), 'res')
-    filename = os.path.expanduser(os.path.join(data_dir, res_name))
+    data_dir = config.get('data_dir', get_xdg_data_save_path())
+    res_dir = os.path.join(data_dir, 'res')
+    filename = os.path.expanduser(os.path.join(res_dir, res_name))
     if os.path.isfile(filename):
         return filename
 
@@ -80,7 +99,7 @@ def resolve_resource_file(res_name):
 def read_stripped_lines(filename):
     """Read a file and return a list of stripped lines.
 
-    Arguments:
+    Args:
         filename (str): path to file to read.
 
     Returns:
@@ -106,7 +125,7 @@ def read_dict(filename, div='='):
         'baz': 'bog'
     }
 
-    Arguments:
+    Args:
         filename (str):   path to file
         div (str): deviders between dict keys and values
 
@@ -121,97 +140,6 @@ def read_dict(filename, div='='):
     return d
 
 
-def mb_to_bytes(size):
-    """Takes a size in MB and returns the number of bytes.
-
-    Arguments:
-        size(int/float): size in Mega Bytes
-
-    Returns:
-        (int/float) size in bytes
-    """
-    return size * 1024 * 1024
-
-
-def _get_cache_entries(directory):
-    """Get information tuple for all regular files in directory.
-
-    Arguments:
-        directory (str): path to directory to check
-
-    Returns:
-        (tuple) (modification time, size, filepath)
-    """
-    entries = (os.path.join(directory, fn) for fn in os.listdir(directory))
-    entries = ((os.stat(path), path) for path in entries)
-
-    # leave only regular files, insert modification date
-    return ((stat[ST_MTIME], stat[ST_SIZE], path)
-            for stat, path in entries if S_ISREG(stat[ST_MODE]))
-
-
-def _delete_oldest(entries, bytes_needed):
-    """Delete files with oldest modification date until space is freed.
-
-    Arguments:
-        entries (tuple): file + file stats tuple
-        bytes_needed (int): disk space that needs to be freed
-
-    Returns:
-        (list) all removed paths
-    """
-    deleted_files = []
-    space_freed = 0
-    for moddate, fsize, path in sorted(entries):
-        try:
-            os.remove(path)
-            space_freed += fsize
-            deleted_files.append(path)
-        except Exception:
-            pass
-
-        if space_freed > bytes_needed:
-            break  # deleted enough!
-
-    return deleted_files
-
-
-def curate_cache(directory, min_free_percent=5.0, min_free_disk=50):
-    """Clear out the directory if needed.
-
-    The curation will only occur if both the precentage and actual disk space
-    is below the limit. This assumes all the files in the directory can be
-    deleted as freely.
-
-    Arguments:
-        directory (str): directory path that holds cached files
-        min_free_percent (float): percentage (0.0-100.0) of drive to keep free,
-                                  default is 5% if not specified.
-        min_free_disk (float): minimum allowed disk space in MB, default
-                               value is 50 MB if not specified.
-    """
-    # Simpleminded implementation -- keep a certain percentage of the
-    # disk available.
-    # TODO: Would be easy to add more options, like whitelisted files, etc.
-    deleted_files = []
-    space = psutil.disk_usage(directory)
-
-    min_free_disk = mb_to_bytes(min_free_disk)
-    percent_free = 100.0 - space.percent
-    if percent_free < min_free_percent and space.free < min_free_disk:
-        LOG.info('Low diskspace detected, cleaning cache')
-        # calculate how many bytes we need to delete
-        bytes_needed = (min_free_percent - percent_free) / 100.0 * space.total
-        bytes_needed = int(bytes_needed + 1.0)
-
-        # get all entries in the directory w/ stats
-        entries = _get_cache_entries(directory)
-        # delete as many as needed starting with the oldest
-        deleted_files = _delete_oldest(entries, bytes_needed)
-
-    return deleted_files
-
-
 def get_cache_directory(domain=None):
     """Get a directory for caching data.
 
@@ -221,24 +149,23 @@ def get_cache_directory(domain=None):
     uses these cached files must be able to fallback and regenerate
     the file.
 
-    Arguments:
+    Args:
         domain (str): The cache domain.  Basically just a subdirectory.
 
     Returns:
         (str) a path to the directory where you can cache data
     """
-    config = mycroft.configuration.Configuration.get()
+    config = mycroft.configuration.Configuration()
     directory = config.get("cache_path")
     if not directory:
-        # If not defined, use /tmp/mycroft/cache
-        directory = os.path.join(tempfile.gettempdir(), "mycroft", "cache")
+        directory = os.path.join(get_xdg_data_save_path(), "cache")
     return ensure_directory_exists(directory, domain)
 
 
 def ensure_directory_exists(directory, domain=None, permissions=0o777):
     """Create a directory and give access rights to all
 
-    Arguments:
+    Args:
         directory (str): Root directory
         domain (str): Domain. Basically a subdirectory to prevent things like
                       overlapping signal filenames.
@@ -269,9 +196,43 @@ def ensure_directory_exists(directory, domain=None, permissions=0o777):
 def create_file(filename):
     """Create the file filename and create any directories needed
 
-    Arguments:
+    Args:
         filename: Path to the file to be created
     """
     ensure_directory_exists(os.path.dirname(filename), permissions=0o775)
     with open(filename, 'w') as f:
         f.write('')
+    os.chmod(filename, 0o777)
+
+
+class FileWatcher:
+    def __init__(self, files, callback, recursive=False):
+        self.observer = Observer()
+        self.handlers = []
+        for file_path in files:
+            watch_dir = dirname(file_path)
+            self.observer.schedule(FileEventHandler(file_path, callback),
+                                   watch_dir, recursive=recursive)
+        self.observer.start()
+
+    def shutdown(self):
+        self.observer.unschedule_all()
+        self.observer.stop()
+
+
+class FileEventHandler(FileSystemEventHandler):
+    def __init__(self, file_path, callback):
+        super().__init__()
+        self._callback = callback
+        self._file_path = file_path
+        self._debounce = 1
+        self._last_update = 0
+
+    def on_any_event(self, event):
+        if event.is_directory:
+            return
+        elif event.event_type in ('created', 'modified'):
+            if event.src_path == self._file_path:
+                if time.time() - self._last_update >= self._debounce:
+                    self._callback(event.src_path)
+                    self._last_update = time.time()

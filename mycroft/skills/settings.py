@@ -57,69 +57,32 @@ SkillSettings Usage Example:
 """
 import json
 import os
-from os.path import dirname
 import re
+from os.path import dirname, basename
 from pathlib import Path
 from threading import Timer
-from xdg.BaseDirectory import xdg_cache_home
 
 import yaml
 
-from mycroft.api import DeviceApi, is_paired
+from mycroft.api import DeviceApi, is_paired, is_backend_disabled
 from mycroft.configuration import Configuration
+from ovos_utils.configuration import get_xdg_cache_save_path
 from mycroft.messagebus.message import Message
 from mycroft.util import camel_case_split
-from mycroft.util.log import LOG
 from mycroft.util.file_utils import ensure_directory_exists
-from .msm_wrapper import build_msm_config, create_msm
+from mycroft.util.log import LOG
 
 ONE_MINUTE = 60
 
-
-def get_local_settings(skill_dir, skill_name) -> dict:
-    """Build a dictionary using the JSON string stored in settings.json."""
-    skill_settings = {}
-    settings_path = Path(skill_dir).joinpath('settings.json')
-    LOG.info(settings_path)
-    if settings_path.exists():
-        with open(str(settings_path)) as settings_file:
-            settings_file_content = settings_file.read()
-        if settings_file_content:
-            try:
-                skill_settings = json.loads(settings_file_content)
-            # TODO change to check for JSONDecodeError in 19.08
-            except Exception:
-                log_msg = 'Failed to load {} settings from settings.json'
-                LOG.exception(log_msg.format(skill_name))
-
-    return skill_settings
-
-
-def save_settings(skill_dir, skill_settings):
-    """Save skill settings to file."""
-    settings_path = Path(skill_dir).joinpath('settings.json')
-
-    # Either the file already exists in /opt, or we are writing
-    # to XDG_CONFIG_DIR and always have the permission to make
-    # sure the file always exists
-    if not Path(settings_path).exists():
-        settings_path.touch(mode=0o644)
-
-    with open(str(settings_path), 'w') as settings_file:
-        try:
-            json.dump(skill_settings, settings_file)
-        except Exception:
-            LOG.exception('error saving skill settings to '
-                          '{}'.format(settings_path))
-        else:
-            LOG.info('Skill settings successfully saved to '
-                     '{}' .format(settings_path))
+# these 2 methods are maintained as part of ovos_utils but need to be available from this location for compatibility
+from ovos_utils.skills.settings import get_local_settings, save_settings
 
 
 def get_display_name(skill_name: str):
     """Splits camelcase and removes leading/trailing "skill"."""
+    skill_name = skill_name.replace("_", " ").replace("-", " ")
     skill_name = re.sub(r'(^[Ss]kill|[Ss]kill$)', '', skill_name)
-    return camel_case_split(skill_name)
+    return camel_case_split(skill_name).title().strip()
 
 
 class SettingsMetaUploader:
@@ -133,82 +96,86 @@ class SettingsMetaUploader:
     _msm_skill_display_name = None
     _settings_meta_path = None
 
-    def __init__(self, skill_directory: str, skill_name: str):
+    def __init__(self, skill_directory: str, skill_name="", skill_id=""):
         self.skill_directory = Path(skill_directory)
-        self.skill_name = skill_name
+        if skill_name:
+            LOG.warning("skill_name is deprecated! use skill_id instead")
+        self.skill_id = skill_id or skill_name or basename(self.skill_directory)
         self.json_path = self.skill_directory.joinpath('settingsmeta.json')
         self.yaml_path = self.skill_directory.joinpath('settingsmeta.yaml')
-        self.config = Configuration.get()
+        self.config = Configuration()
         self.settings_meta = {}
         self.api = None
         self.upload_timer = None
-        self.sync_enabled = self.config["server"].get("sync_skill_settings",
-                                                      False)
+        if is_backend_disabled():
+            self.sync_enabled = False
+        else:
+            self.sync_enabled = self.config["server"] \
+                .get("sync_skill_settings", False)
         if not self.sync_enabled:
             LOG.info("Skill settings sync is disabled, settingsmeta will "
                      "not be uploaded")
 
         self._stopped = None
 
-        # Property placeholders
-        self._msm = None
-        self._skill_gid = None
+    @property
+    def skill_name(self):
+        """DEPRECATED: do not use, method only for api backwards compatibility
+        Logs a warning and returns self.skill_id
+        """
+        LOG.warning("self.skill_name is deprecated! use self.skill_id instead")
+        return self.skill_id
+
+    @skill_name.setter
+    def skill_name(self, val):
+        """DEPRECATED: do not use, method only for api backwards compatibility
+        Logs a warning and sets self.skill_id
+        """
+        LOG.warning("self.skill_name is deprecated! use self.skill_id instead")
+        self.skill_id = val
 
     @property
     def msm(self):
-        """Instance of the Mycroft Skills Manager"""
-        if self._msm is None:
-            msm_config = build_msm_config(self.config)
-            self._msm = create_msm(msm_config)
-
-        return self._msm
+        """DEPRECATED: do not use, method only for api backwards compatibility
+        Logs a warning and returns None
+        """
+        # unused but need to keep api backwards compatible
+        # log a warning and move on
+        LOG.warning("msm has been deprecated\n"
+                    "DO NOT use self.msm property")
+        return None
 
     def get_local_skills(self):
-        """Generate a mapping of skill path to skill name for all local skills.
+        """DEPRECATED: do not use, method only for api backwards compatibility
+        Logs a warning and returns empty dictionary
         """
-        return {skill.path: skill for skill in self.msm.local_skills.values()}
+        # unused but need to keep api backwards compatible
+        # log a warning and move on
+        LOG.warning("msm has been deprecated, do not use this utility method\n"
+                    "get_local_skills always returns an empty dict")
+        return {}
 
     @property
     def skill_gid(self):
-        """Skill identifier recognized by backend and core.
-
-        The skill_gid contains the device ID if the skill has been modified
-        on that device.  MSM does not know the ID of the device.  So, if it
-        finds a modified skill, it prepends the skill name portion of the ID
-        with "@|".
-
-        The device ID is known to this class.  To "finalize" the skill_gid,
-        insert the device ID between the "@" and the "|"
-        """
+        """Skill identifier recognized by selene backend"""
         api = self.api or DeviceApi()
         if api.identity.uuid:
-            skills = self.get_local_skills()
-            skill_dir = str(self.skill_directory)
-            if skill_dir not in skills:
-                self.msm.clear_cache()
-                skills = self.get_local_skills()
-            skill = skills[skill_dir]
-            # If modified prepend the device uuid
-            self._skill_gid = skill.skill_gid.replace(
-                '@|',
-                '@{}|'.format(api.identity.uuid)
-            )
-
-            return self._skill_gid
-        else:
-            return None
+            return f'@{api.identity.uuid}|{self.skill_id}'
+        return f'@|{self.skill_id}'
 
     @property
     def msm_skill_display_name(self):
-        """Display name defined in MSM for use in settings meta."""
-        if self._msm_skill_display_name is None:
-            skills = {
-                skill.path: skill for skill in self.msm.local_skills.values()
-            }
-            skill = skills[str(self.skill_directory)]
-            self._msm_skill_display_name = skill.meta_info.get('display_name')
+        """DEPRECATED: do not use, method only for api backwards compatibility
+        Logs a warning and returns self.skill_display_name
+        """
+        LOG.warning("msm_skill_display_name has been deprecated\n"
+                    "use skill_display_name instead")
+        return self.skill_display_name
 
-        return self._msm_skill_display_name
+    @property
+    def skill_display_name(self):
+        """Display name for use in settings meta."""
+        return get_display_name(self.skill_id.split(".")[0])
 
     @property
     def settings_meta_path(self):
@@ -234,8 +201,8 @@ class SettingsMetaUploader:
             self.api = DeviceApi()
             if self.api.identity.uuid:
                 settings_meta_file_exists = (
-                    self.json_path.is_file() or
-                    self.yaml_path.is_file()
+                        self.json_path.is_file() or
+                        self.yaml_path.is_file()
                 )
                 if settings_meta_file_exists:
                     self._load_settings_meta_file()
@@ -249,7 +216,7 @@ class SettingsMetaUploader:
             LOG.debug('settingsmeta.json not uploaded - device is not paired')
 
         if not synced and not self._stopped:
-            self.upload_timer = Timer(ONE_MINUTE, self.upload)
+            self.upload_timer = Timer(60, self.upload)
             self.upload_timer.daemon = True
             self.upload_timer.start()
 
@@ -271,8 +238,7 @@ class SettingsMetaUploader:
                 else:
                     self.settings_meta = yaml.safe_load(meta_file)
         except Exception:
-            log_msg = "Failed to load settingsmeta file: "
-            LOG.exception(log_msg + str(self.settings_meta_path))
+            LOG.error(f"Failed to load settingsmeta file: {self.settings_meta_path}")
 
     def _update_settings_meta(self):
         """Make sure the skill gid and name are included in settings meta.
@@ -284,9 +250,9 @@ class SettingsMetaUploader:
         self.settings_meta.update(
             skill_gid=self.skill_gid,
             display_name=(
-                self.msm_skill_display_name or
+                self.skill_display_name or
                 self.settings_meta.get('name') or
-                get_display_name(self.skill_name)
+                get_display_name(self.skill_id.split(".")[0])
             )
         )
         for deprecated in ('color', 'identifier', 'name'):
@@ -296,24 +262,20 @@ class SettingsMetaUploader:
                     'settingsmeta file is no longer supported.'
                 )
                 LOG.warning(log_msg.format(deprecated))
-                del(self.settings_meta[deprecated])
+                del (self.settings_meta[deprecated])
 
     def _issue_api_call(self):
         """Use the API to send the settings meta to the server."""
         try:
             self.api.upload_skill_metadata(self.settings_meta)
-        except Exception:
-            LOG.exception('Failed to upload skill settings meta '
-                          'for {}'.format(self.skill_gid))
-            success = False
-        else:
-            success = True
-
-        return success
+        except Exception as e:
+            LOG.error(f'Failed to upload skill settings meta for {self.skill_gid}')
+            return False
+        return True
 
 
 # Path to remote cache
-REMOTE_CACHE = Path(xdg_cache_home, 'mycroft', 'remote_skill_settings.json')
+REMOTE_CACHE = Path(get_xdg_cache_save_path(), 'remote_skill_settings.json')
 
 
 def load_remote_settings_cache():
@@ -335,7 +297,7 @@ def load_remote_settings_cache():
 def save_remote_settings_cache(remote_settings):
     """Save updated remote settings to cache file.
 
-    Arguments:
+    Args:
         remote_settings (dict): downloaded remote settings.
     """
     try:
@@ -362,10 +324,14 @@ class SkillSettingsDownloader:
 
         self.api = DeviceApi()
         self.download_timer = None
-        self.sync_enabled = Configuration.get()["server"]\
-            .get("sync_skill_settings", False)
+
+        if is_backend_disabled():
+            self.sync_enabled = False
+        else:
+            self.sync_enabled = Configuration().get("server", {}).get("sync_skill_settings", False)
+
         if not self.sync_enabled:
-            LOG.info("Skill settings sync is disabled, backend settings will "
+            LOG.debug("Skill settings sync is disabled, backend settings will "
                      "not be downloaded")
 
     def stop_downloading(self):
@@ -401,7 +367,7 @@ class SkillSettingsDownloader:
             self.download_timer.cancel()
 
         if self.continue_downloading:
-            self.download_timer = Timer(ONE_MINUTE, self.download)
+            self.download_timer = Timer(60, self.download)
             self.download_timer.daemon = True
             self.download_timer.start()
 
@@ -414,7 +380,7 @@ class SkillSettingsDownloader:
         try:
             remote_settings = self.api.get_skill_settings()
         except Exception:
-            LOG.exception('Failed to download remote settings from server.')
+            LOG.error('Failed to download remote settings from server.')
             remote_settings = None
 
         return remote_settings
@@ -426,7 +392,7 @@ class SkillSettingsDownloader:
             try:
                 previous_settings = self.last_download_result.get(skill_gid)
             except Exception:
-                LOG.exception('error occurred handling setting change events')
+                LOG.error('error occurred handling setting change events')
             else:
                 if previous_settings != skill_settings:
                     settings_changed = True

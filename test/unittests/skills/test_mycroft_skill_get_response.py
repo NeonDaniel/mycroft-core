@@ -5,10 +5,15 @@ from threading import Thread
 import time
 from unittest import TestCase, mock
 
-from mycroft import MycroftSkill
+from lingua_franca import load_language
+
+from mycroft.skills import MycroftSkill
 from mycroft.messagebus import Message
 
 from test.unittests.mocks import base_config, AnyCallable
+
+
+load_language("en-us")
 
 
 def create_converse_responder(response, skill):
@@ -17,7 +22,7 @@ def create_converse_responder(response, skill):
     The function waits for the converse method to be replaced by the
     _wait_response logic and afterwards injects the provided response.
 
-    Arguments:
+    Args:
         response (str): Sentence to inject.
         skill (MycroftSkill): skill to monitor.
     """
@@ -39,14 +44,15 @@ def create_converse_responder(response, skill):
     return wait_for_new_converse
 
 
-@mock.patch('mycroft.skills.mycroft_skill.mycroft_skill.Configuration')
+@mock.patch('mycroft.configuration.Configuration')
 def create_skill(mock_conf, lang='en-us'):
-    mock_conf.get.return_value = base_config()
-    skill = MycroftSkill(name='test_skill')
+    cfg = base_config()
+    cfg["lang"] = lang
+    mock_conf.get.return_value = cfg
     bus = mock.Mock()
-    skill.bind(bus)
-    skill.config_core['lang'] = lang
-    skill.load_data_files(join(dirname(__file__), 'test_skill'))
+    skill = MycroftSkill(name='test_skill')
+    skill.root_dir = join(dirname(__file__), 'test_skill')
+    skill._startup(bus)
     return skill
 
 
@@ -149,6 +155,21 @@ class TestMycroftSkillGetResponse(TestCase):
         skill._wait_response.assert_called_with(AnyCallable(), validator,
                                                 AnyCallable(), -1)
 
+    def test_converse_detection(self):
+        """Ensure validator is passed on."""
+        skill = create_skill()
+        skill._wait_response = mock.Mock()
+        skill.speak_dialog = mock.Mock()
+
+        def validator(*args, **kwargs):
+            self.assertTrue(skill.converse_is_implemented)
+
+        self.assertFalse(skill.converse_is_implemented)
+        skill.get_response('what do you want', validator=validator)
+        skill._wait_response.assert_called_with(AnyCallable(), validator,
+                                                AnyCallable(), -1)
+        self.assertFalse(skill.converse_is_implemented)
+
 
 class TestMycroftSkillAskYesNo(TestCase):
     def test_ask_yesno_no(self):
@@ -178,8 +199,12 @@ class TestMycroftSkillAskYesNo(TestCase):
         response = skill.ask_yesno('Do you like breakfast')
         self.assertEqual(response, 'I am a fish')
 
-    def test_ask_yesno_german(self):
+    @mock.patch('mycroft.skills.mycroft_skill.mycroft_skill.dig_for_message')
+    def test_ask_yesno_german(self, dig_mock):
         """Check that when the skill is set to german it responds to "ja"."""
+        # lang is session based, it comes from originating message in ovos-core
+        dig_mock.return_value = Message("", {"lang": "de-de"})
+
         skill = create_skill(lang='de-de')
         skill.get_response = mock.Mock()
         skill.get_response.return_value = 'ja'

@@ -13,25 +13,41 @@
 # limitations under the License.
 import os
 from os.path import join, dirname, expanduser, exists
+from time import sleep
 
-DEFAULT_CONFIG = join(dirname(__file__), 'mycroft.conf')
+from ovos_utils.configuration import get_xdg_config_save_path, get_webcache_location, get_xdg_base, get_config_filename, \
+    find_default_config
+
+DEFAULT_CONFIG = find_default_config() or \
+                 join(dirname(__file__), "mycroft.conf")
 SYSTEM_CONFIG = os.environ.get('MYCROFT_SYSTEM_CONFIG',
-                               '/etc/mycroft/mycroft.conf')
-USER_CONFIG = join(expanduser('~'), '.mycroft/mycroft.conf')
+                               f'/etc/{get_xdg_base()}/{get_config_filename()}')
+# TODO: remove in 22.02
+# Make sure we support the old location still
+# Deprecated and will be removed eventually
+OLD_USER_CONFIG = join(expanduser('~'), '.' + get_xdg_base(), get_config_filename())
+USER_CONFIG = join(get_xdg_config_save_path(), get_config_filename())
 REMOTE_CONFIG = "mycroft.ai"
-WEB_CONFIG_CACHE = os.environ.get('MYCROFT_WEB_CACHE',
-                                  '/var/tmp/mycroft_web_cache.json')
+WEB_CONFIG_CACHE = os.environ.get('MYCROFT_WEB_CACHE') or get_webcache_location()
 
 
 def __ensure_folder_exists(path):
     """ Make sure the directory for the specified path exists.
 
-        Arguments:
+        Args:
             path (str): path to config file
      """
     directory = dirname(path)
     if not exists(directory):
-        os.makedirs(directory)
+        try:
+            os.makedirs(directory)
+        except:
+            sleep(0.2)
+            if not exists(directory):
+                try:
+                    os.makedirs(directory)
+                except Exception as e:
+                    pass
 
 
 __ensure_folder_exists(WEB_CONFIG_CACHE)

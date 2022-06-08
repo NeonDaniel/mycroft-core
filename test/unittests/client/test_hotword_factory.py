@@ -14,7 +14,7 @@
 #
 import unittest
 
-from mycroft.client.speech.hotword_factory import HotWordFactory
+from mycroft.listener.hotword_factory import HotWordFactory
 
 
 class PocketSphinxTest(unittest.TestCase):
@@ -30,18 +30,6 @@ class PocketSphinxTest(unittest.TestCase):
         config = config['hey mycroft']
         self.assertEqual(config['phonemes'], p.phonemes)
         self.assertEqual(config['threshold'], p.threshold)
-
-    def testInvalid(self):
-        config = {
-            'hey Zeds': {
-                'module': 'pocketsphinx',
-                'phonemes': 'ZZZZZZZZZ',
-                'threshold': 1e-90
-            }
-        }
-        p = HotWordFactory.create_hotword('hey Zeds', config)
-        self.assertEqual(p.phonemes, 'HH EY . M AY K R AO F T')
-        self.assertEqual(p.key_phrase, 'hey mycroft')
 
     def testVictoria(self):
         config = {

@@ -1,9 +1,22 @@
-import requests
 import socket
-from urllib.request import urlopen
 from urllib.error import URLError
+from urllib.request import urlopen
 
-from .log import LOG
+import requests
+from mycroft.util.log import LOG
+import mycroft.configuration
+
+
+def _get_network_tests_config():
+    """Get network_tests object from mycroft.configuration."""
+    config = mycroft.configuration.Configuration()
+    return config.get('network_tests', {
+        "dns_primary": "8.8.8.8",
+        "dns_secondary": "8.8.4.4",
+        "web_url": "https://www.google.com",
+        "ncsi_endpoint": "http://www.msftncsi.com/ncsi.txt",
+        "ncsi_expected_text": "Microsoft NCSI"
+    })
 
 
 def connected():
@@ -27,16 +40,20 @@ def _connected_ncsi():
     Returns:
         True if internet connection can be detected
     """
+    config = _get_network_tests_config()
+    ncsi_endpoint = config.get('ncsi_endpoint',
+                               "http://www.msftncsi.com/ncsi.txt")
+    expected_text = config.get('ncsi_expected_text', "Microsoft NCSI")
     try:
-        r = requests.get('http://www.msftncsi.com/ncsi.txt')
-        if r.text == 'Microsoft NCSI':
+        r = requests.get(ncsi_endpoint)
+        if r.text == expected_text:
             return True
     except Exception:
-        pass
+        LOG.error("Unable to verify connection via NCSI endpoint.")
     return False
 
 
-def _connected_dns(host="8.8.8.8", port=53, timeout=3):
+def _connected_dns(host=None, port=53, timeout=3):
     """Check internet connection by connecting to DNS servers
 
     Returns:
@@ -46,18 +63,25 @@ def _connected_dns(host="8.8.8.8", port=53, timeout=3):
     # Host: 8.8.8.8 (google-public-dns-a.google.com)
     # OpenPort: 53/tcp
     # Service: domain (DNS/TCP)
+    config = _get_network_tests_config()
+    if host is None:
+        host = config.get('dns_primary', "8.8.8.8")
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
         s.connect((host, port))
         return True
     except IOError:
+        LOG.error("Unable to connect to primary DNS server, "
+                  "trying secondary...")
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(timeout)
-            s.connect(("8.8.4.4", port))
+            dns_secondary = config.get('dns_secondary', "8.8.4.4")
+            s.connect((dns_secondary, port))
             return True
         except IOError:
+            LOG.error("Unable to connect to secondary DNS server.")
             return False
 
 
@@ -67,10 +91,12 @@ def _connected_google():
         True if connection attempt succeeded
     """
     connect_success = False
+    config = _get_network_tests_config()
+    url = config.get('web_url', "https://www.google.com")
     try:
-        urlopen('https://www.google.com', timeout=3)
+        urlopen(url, timeout=3)
     except URLError as ue:
-        LOG.debug('Attempt to connect to internet failed: ' + str(ue.reason))
+        LOG.error('Attempt to connect to internet failed: ' + str(ue.reason))
     else:
         connect_success = True
 

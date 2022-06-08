@@ -23,7 +23,7 @@ from pathlib import Path
 from os.path import join
 
 from mycroft.util import resolve_resource_file
-from mycroft.util.format import expand_options
+from mycroft.util.bracket_expansion import expand_options
 from mycroft.util.log import LOG
 
 
@@ -49,7 +49,7 @@ class MustacheDialogRenderer:
     def load_template_file(self, template_name, filename):
         """Load a template by file name into the templates cache.
 
-        Arguments:
+        Args:
             template_name (str): a unique identifier for a group of templates
             filename (str): a fully qualified filename of a mustache template.
         """
@@ -78,7 +78,7 @@ class MustacheDialogRenderer:
 
         Tries not to let Mycroft say exactly the same thing twice in a row.
 
-        Arguments:
+        Args:
             template_name (str): the name of a template group.
             context (dict): dictionary representing values to be rendered
             index (int): optional, the specific index in the collection of
@@ -123,7 +123,7 @@ class MustacheDialogRenderer:
 def load_dialogs(dialog_dir, renderer=None):
     """Load all dialog files within the specified directory.
 
-    Arguments:
+    Args:
         dialog_dir (str): directory that contains dialog files
 
     Returns:
@@ -151,7 +151,7 @@ def get(phrase, lang=None, context=None):
     If no file is found, the requested phrase is returned as the string. This
     will use the default language for translations.
 
-    Arguments:
+    Args:
         phrase (str): resource phrase to retrieve/translate
         lang (str): the language to use
         context (dict): values to be inserted into the string
@@ -162,7 +162,7 @@ def get(phrase, lang=None, context=None):
 
     if not lang:
         from mycroft.configuration import Configuration
-        lang = Configuration.get().get('lang')
+        lang = Configuration().get('lang', "en-us")
 
     filename = join('text', lang.lower(), phrase + '.dialog')
     template = resolve_resource_file(filename)

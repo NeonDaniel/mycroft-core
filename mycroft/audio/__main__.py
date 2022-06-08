@@ -24,9 +24,9 @@ from mycroft.util import (
 )
 from mycroft.util.log import LOG
 from mycroft.util.process_utils import ProcessStatus, StatusCallbackMap
-
+from mycroft.configuration import setup_locale
 import mycroft.audio.speech as speech
-from .audioservice import AudioService
+from mycroft.audio.audioservice import AudioService
 
 
 def on_ready():
@@ -34,7 +34,7 @@ def on_ready():
 
 
 def on_error(e='Unknown'):
-    LOG.error('Audio service failed to launch ({}).'.format(repr(e)))
+    LOG.error(f'Audio service failed to launch ({e}).')
 
 
 def on_stopping():
@@ -44,30 +44,37 @@ def on_stopping():
 def main(ready_hook=on_ready, error_hook=on_error, stopping_hook=on_stopping):
     """Start the Audio Service and connect to the Message Bus"""
     LOG.info("Starting Audio Service")
+    callbacks = StatusCallbackMap(on_ready=ready_hook, on_error=error_hook,
+                                  on_stopping=stopping_hook)
+    status = ProcessStatus('audio', callback_map=callbacks)
+    status.set_started()
     try:
         reset_sigint_handler()
         check_for_signal("isSpeaking")
         whitelist = ['mycroft.audio.service']
         bus = start_message_bus_client("AUDIO", whitelist=whitelist)
-        callbacks = StatusCallbackMap(on_ready=ready_hook, on_error=error_hook,
-                                      on_stopping=stopping_hook)
-        status = ProcessStatus('audio', bus, callbacks)
+        status.bind(bus)
 
+        setup_locale()
         speech.init(bus)
 
         # Connect audio service instance to message bus
         audio = AudioService(bus)
-        status.set_started()
+
     except Exception as e:
         status.set_error(e)
     else:
-        if audio.wait_for_load() and len(audio.service) > 0:
-            # If at least one service exists, report ready
+        if audio.wait_for_load():
+            if len(audio.service) == 0:
+                LOG.warning('No audio backends loaded! Audio playback is not available')
+                LOG.info("Running audio service in TTS only mode")
+        # If at least TTS exists, report ready
+        if speech.tts:
             status.set_ready()
             wait_for_exit_signal()
             status.set_stopping()
         else:
-            status.set_error('No audio services loaded')
+            status.set_error('No TTS loaded')
 
         speech.shutdown()
         audio.shutdown()

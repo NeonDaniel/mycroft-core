@@ -12,178 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib
-import sys
 import time
-from os import listdir
-from os.path import abspath, dirname, basename, isdir, join
 from threading import Lock
 
+from mycroft.audio.services import RemoteAudioBackend
 from mycroft.configuration import Configuration
 from mycroft.messagebus.message import Message
 from mycroft.util.log import LOG
 from mycroft.util.monotonic_event import MonotonicEvent
 from mycroft.util.plugins import find_plugins
-
-from .services import RemoteAudioBackend
+from ovos_plugin_manager.audio import setup_audio_service as setup_service, load_audio_service_plugins as load_plugins
+# deprecated, but can not be deleted for backwards compat imports
+from mycroft.deprecated.audio import load_internal_services, load_services, create_service_spec, get_services
 
 MINUTES = 60  # Seconds in a minute
-
-MAINMODULE = '__init__'
-sys.path.append(abspath(dirname(__file__)))
-
-
-def create_service_spec(service_folder):
-    """Prepares a descriptor that can be used together with imp.
-
-        Args:
-            service_folder: folder that shall be imported.
-
-        Returns:
-            Dict with import information
-    """
-    module_name = 'audioservice_' + basename(service_folder)
-    path = join(service_folder, MAINMODULE + '.py')
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    mod = importlib.util.module_from_spec(spec)
-    info = {'spec': spec, 'mod': mod, 'module_name': module_name}
-    return {"name": basename(service_folder), "info": info}
-
-
-def get_services(services_folder):
-    """
-        Load and initialize services from all subfolders.
-
-        Args:
-            services_folder: base folder to look for services in.
-
-        Returns:
-            Sorted list of audio services.
-    """
-    LOG.info("Loading services from " + services_folder)
-    services = []
-    possible_services = listdir(services_folder)
-    for i in possible_services:
-        location = join(services_folder, i)
-        if (isdir(location) and
-                not MAINMODULE + ".py" in listdir(location)):
-            for j in listdir(location):
-                name = join(location, j)
-                if (not isdir(name) or
-                        not MAINMODULE + ".py" in listdir(name)):
-                    continue
-                try:
-                    services.append(create_service_spec(name))
-                except Exception:
-                    LOG.error('Failed to create service from ' + name,
-                              exc_info=True)
-        if (not isdir(location) or
-                not MAINMODULE + ".py" in listdir(location)):
-            continue
-        try:
-            services.append(create_service_spec(location))
-        except Exception:
-            LOG.error('Failed to create service from ' + location,
-                      exc_info=True)
-    return sorted(services, key=lambda p: p.get('name'))
-
-
-def setup_service(service_module, config, bus):
-    """Run the appropriate setup function and return created service objects.
-
-    Arguments:
-        service_module: Python module to run
-        config (dict): Mycroft configuration dict
-        bus (MessageBusClient): Messagebus interface
-    Returns:
-        (list) List of created services.
-    """
-    if (hasattr(service_module, 'autodetect') and
-            callable(service_module.autodetect)):
-        try:
-            return service_module.autodetect(config, bus)
-        except Exception as e:
-            LOG.error('Failed to autodetect. ' + repr(e))
-    elif hasattr(service_module, 'load_service'):
-        try:
-            return service_module.load_service(config, bus)
-        except Exception as e:
-            LOG.error('Failed to load service. ' + repr(e))
-    else:
-        return None
-
-
-def load_internal_services(config, bus, path=None):
-    """Load audio services included in Mycroft-core.
-
-    Arguments:
-        config: configuration dict for the audio backends.
-        bus: Mycroft messagebus
-        path: (default None) optional path for builtin audio service
-              implementations
-    Returns:
-        List of started services
-    """
-    if path is None:
-        path = dirname(abspath(__file__)) + '/services/'
-    service_directories = get_services(path)
-    service = []
-    for descriptor in service_directories:
-        LOG.info('Loading ' + descriptor['name'])
-        try:
-            service_module = descriptor['info']['mod']
-            spec = descriptor['info']['spec']
-            module_name = descriptor['info']['module_name']
-            sys.modules[module_name] = service_module
-            spec.loader.exec_module(service_module)
-        except Exception as e:
-            LOG.error('Failed to import module ' + descriptor['name'] + '\n' +
-                      repr(e))
-        else:
-            s = setup_service(service_module, config, bus)
-            if s:
-                service += s
-
-    return service
-
-
-def load_plugins(config, bus):
-    """Load installed audioservice plugins.
-
-    Arguments:
-        config: configuration dict for the audio backends.
-        bus: Mycroft messagebus
-
-    Returns:
-        List of started services
-    """
-    plugin_services = []
-    plugins = find_plugins('mycroft.plugin.audioservice')
-    for plug in plugins:
-        service = setup_service(plug, config, bus)
-        if service:
-            plugin_services += service
-    return plugin_services
-
-
-def load_services(config, bus, path=None):
-    """Load builtin services as well as service plugins
-
-    The builtin service folder is scanned (or a folder indicated by the path
-    parameter) for services and plugins registered with the
-    "mycroft.plugin.audioservice" entrypoint group.
-
-    Arguments:
-        config: configuration dict for the audio backends.
-        bus: Mycroft messagebus
-        path: (default None) optional path for builtin audio service
-              implementations
-
-    Returns:
-        List of started services.
-    """
-    return (load_internal_services(config, bus, path) +
-            load_plugins(config, bus))
 
 
 class AudioService:
@@ -198,7 +40,7 @@ class AudioService:
                 bus: Mycroft messagebus
         """
         self.bus = bus
-        self.config = Configuration.get().get("Audio")
+        self.config = Configuration().get("Audio") or {}
         self.service_lock = Lock()
 
         self.default = None
@@ -216,7 +58,7 @@ class AudioService:
         Sets up the global service, default and registers the event handlers
         for the subsystem.
         """
-        services = load_services(self.config, self.bus)
+        services = load_plugins(self.config, self.bus)
         # Sort services so local services are checked first
         local = [s for s in services if not isinstance(s, RemoteAudioBackend)]
         remote = [s for s in services if isinstance(s, RemoteAudioBackend)]
@@ -248,6 +90,12 @@ class AudioService:
         self.bus.on('mycroft.audio.service.prev', self._prev)
         self.bus.on('mycroft.audio.service.track_info', self._track_info)
         self.bus.on('mycroft.audio.service.list_backends', self._list_backends)
+        self.bus.on('mycroft.audio.service.set_track_position',
+                    self._set_track_position)
+        self.bus.on('mycroft.audio.service.get_track_position',
+                    self._get_track_position)
+        self.bus.on('mycroft.audio.service.get_track_length',
+                    self._get_track_length)
         self.bus.on('mycroft.audio.service.seek_forward', self._seek_forward)
         self.bus.on('mycroft.audio.service.seek_backward', self._seek_backward)
         self.bus.on('recognizer_loop:audio_output_start', self._lower_volume)
@@ -261,7 +109,7 @@ class AudioService:
     def wait_for_load(self, timeout=3 * MINUTES):
         """Wait for services to be loaded.
 
-        Arguments:
+        Args:
             timeout (float): Seconds to wait (default 3 minutes)
         Returns:
             (bool) True if loading completed within timeout, else False.
@@ -291,6 +139,8 @@ class AudioService:
             Args:
                 message: message bus message, not used but required
         """
+        if not self._is_message_for_service(message):
+            return
         if self.current:
             self.current.pause()
 
@@ -301,6 +151,8 @@ class AudioService:
             Args:
                 message: message bus message, not used but required
         """
+        if not self._is_message_for_service(message):
+            return
         if self.current:
             self.current.resume()
 
@@ -312,6 +164,8 @@ class AudioService:
             Args:
                 message: message bus message, not used but required
         """
+        if not self._is_message_for_service(message):
+            return
         if self.current:
             self.current.next()
 
@@ -323,16 +177,25 @@ class AudioService:
             Args:
                 message: message bus message, not used but required
         """
+        if not self._is_message_for_service(message):
+            return
         if self.current:
             self.current.previous()
 
-    def _perform_stop(self):
+    def _perform_stop(self, message=None):
         """Stop audioservice if active."""
+        if not self._is_message_for_service(message):
+            return
         if self.current:
             name = self.current.name
             if self.current.stop():
-                self.bus.emit(Message("mycroft.stop.handled",
-                                      {"by": "audio:" + name}))
+                if message:
+                    msg = message.reply("mycroft.stop.handled",
+                                        {"by": "audio:" + name})
+                else:
+                    msg = Message("mycroft.stop.handled",
+                                  {"by": "audio:" + name})
+                self.bus.emit(msg)
 
         self.current = None
 
@@ -343,10 +206,16 @@ class AudioService:
             Args:
                 message: message bus message, not used but required
         """
+        if not self._is_message_for_service(message):
+            return
         if time.monotonic() - self.play_start_time > 1:
             LOG.debug('stopping all playing services')
             with self.service_lock:
-                self._perform_stop()
+                try:
+                    self._perform_stop(message)
+                except Exception as e:
+                    LOG.exception(e)
+                    LOG.error("failed to stop!")
         LOG.info('END Stop')
 
     def _lower_volume(self, message=None):
@@ -356,13 +225,17 @@ class AudioService:
             Args:
                 message: message bus message, not used but required
         """
+        if not self._is_message_for_service(message):
+            return
         if self.current:
             LOG.debug('lowering volume')
             self.current.lower_volume()
             self.volume_is_low = True
 
-    def _restore_volume(self, _=None):
+    def _restore_volume(self, message=None):
         """Triggered when mycroft is done speaking and restores the volume."""
+        if not self._is_message_for_service(message):
+            return
         current = self.current
         if current:
             LOG.debug('restoring volume')
@@ -378,6 +251,9 @@ class AudioService:
             Args:
                 message: message bus message, not used but required
         """
+        if not self._is_message_for_service(message):
+            return
+
         def restore_volume():
             LOG.debug('restoring volume')
             self.current.restore_volume()
@@ -437,11 +313,31 @@ class AudioService:
         self.current = selected_service
         self.play_start_time = time.monotonic()
 
+    @staticmethod
+    def _is_message_for_service(message):
+        if not message:
+            return True
+        destination = message.context.get("destination")
+        if destination:
+            if "audio" in destination or "debug_cli" in destination:
+                # request from device
+                return True
+            # external request, do not handle
+            return False
+        # broadcast for everyone
+        return True
+
     def _queue(self, message):
+        if not self._is_message_for_service(message):
+            return
         if self.current:
             with self.service_lock:
-                tracks = message.data['tracks']
-                self.current.add_list(tracks)
+                try:
+                    tracks = message.data['tracks']
+                    self.current.add_list(tracks)
+                except Exception as e:
+                    LOG.exception(e)
+                    LOG.error("failed to queue tracks!")
         else:
             self._play(message)
 
@@ -454,20 +350,28 @@ class AudioService:
             Args:
                 message: message bus message, not used but required
         """
+        if not self._is_message_for_service(message):
+            return
         with self.service_lock:
             tracks = message.data['tracks']
             repeat = message.data.get('repeat', False)
             # Find if the user wants to use a specific backend
             for s in self.service:
-                if ('utterance' in message.data and
-                        s.name in message.data['utterance']):
-                    prefered_service = s
-                    LOG.debug(s.name + ' would be prefered')
-                    break
+                try:
+                    if ('utterance' in message.data and
+                            s.name in message.data['utterance']):
+                        prefered_service = s
+                        LOG.debug(s.name + ' would be prefered')
+                        break
+                except Exception as e:
+                    LOG.error(f"failed to parse audio service name: {s}")
             else:
                 prefered_service = None
-            self.play(tracks, prefered_service, repeat)
-            time.sleep(0.5)
+            try:
+                self.play(tracks, prefered_service, repeat)
+                time.sleep(0.5)
+            except Exception as e:
+                LOG.exception(e)
 
     def _track_info(self, message):
         """
@@ -476,15 +380,19 @@ class AudioService:
             Args:
                 message: message bus message, not used but required
         """
+        if not self._is_message_for_service(message):
+            return
         if self.current:
             track_info = self.current.track_info()
         else:
             track_info = {}
-        self.bus.emit(Message('mycroft.audio.service.track_info_reply',
-                              data=track_info))
+        self.bus.emit(message.reply('mycroft.audio.service.track_info_reply',
+                                    data=track_info))
 
     def _list_backends(self, message):
         """ Return a dict of available backends. """
+        if not self._is_message_for_service(message):
+            return
         data = {}
         for s in self.service:
             info = {
@@ -495,6 +403,41 @@ class AudioService:
             data[s.name] = info
         self.bus.emit(message.response(data))
 
+    def _get_track_length(self, message):
+        """
+        getting the duration of the audio in milliseconds
+        """
+        if not self._is_message_for_service(message):
+            return
+        dur = None
+        if self.current:
+            dur = self.current.get_track_length()
+        self.bus.emit(message.response({"length": dur}))
+
+    def _get_track_position(self, message):
+        """
+        get current position in milliseconds
+        """
+        if not self._is_message_for_service(message):
+            return
+        pos = None
+        if self.current:
+            pos = self.current.get_track_position()
+        self.bus.emit(message.response({"position": pos}))
+
+    def _set_track_position(self, message):
+        """
+            Handle message bus command to go to position (in milliseconds)
+
+            Args:
+                message: message bus message
+        """
+        if not self._is_message_for_service(message):
+            return
+        milliseconds = message.data.get("position")
+        if milliseconds and self.current:
+            self.current.set_track_position(milliseconds)
+
     def _seek_forward(self, message):
         """
             Handle message bus command to skip X seconds
@@ -502,6 +445,8 @@ class AudioService:
             Args:
                 message: message bus message
         """
+        if not self._is_message_for_service(message):
+            return
         seconds = message.data.get("seconds", 1)
         if self.current:
             self.current.seek_forward(seconds)
@@ -513,6 +458,8 @@ class AudioService:
             Args:
                 message: message bus message
         """
+        if not self._is_message_for_service(message):
+            return
         seconds = message.data.get("seconds", 1)
         if self.current:
             self.current.seek_backward(seconds)
@@ -534,6 +481,12 @@ class AudioService:
         self.bus.remove('mycroft.audio.service.next', self._next)
         self.bus.remove('mycroft.audio.service.prev', self._prev)
         self.bus.remove('mycroft.audio.service.track_info', self._track_info)
+        self.bus.remove('mycroft.audio.service.get_track_position',
+                        self._get_track_position)
+        self.bus.remove('mycroft.audio.service.set_track_position',
+                        self._set_track_position)
+        self.bus.remove('mycroft.audio.service.get_track_length',
+                        self._get_track_length)
         self.bus.remove('mycroft.audio.service.seek_forward',
                         self._seek_forward)
         self.bus.remove('mycroft.audio.service.seek_backward',

@@ -12,302 +12,96 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import sys
 import unittest
-
+from io import StringIO
 from unittest.mock import MagicMock, patch
 
-import mycroft.stt
+import mycroft.configuration
 from mycroft.configuration import Configuration
-
+import mycroft.listener.stt
+from mycroft.listener import RecognizerLoop
+from mycroft.util.log import LOG
+from ovos_stt_plugin_vosk import VoskKaldiSTT
 from test.util import base_config
+
+STT_CONFIG = base_config()
+STT_CONFIG.merge({
+        'stt': {
+            'module': 'mycroft',
+            "fallback_module": "ovos-stt-plugin-vosk",
+            'mycroft': {'uri': 'https://test.com'}
+        },
+        'lang': 'en-US'
+    })
+
+STT_NO_FB_CONFIG = base_config()
+STT_NO_FB_CONFIG.merge({
+        'stt': {
+            'module': 'mycroft',
+            'fallback_module': None,
+            'mycroft': {'uri': 'https://test.com'}
+        },
+        'lang': 'en-US'
+    })
+
+STT_INVALID_FB_CONFIG = base_config()
+STT_INVALID_FB_CONFIG.merge({
+        'stt': {
+            'module': 'mycroft',
+            'fallback_module': 'invalid',
+            'mycroft': {'uri': 'https://test.com'}
+        },
+        'lang': 'en-US'
+    })
 
 
 class TestSTT(unittest.TestCase):
-    @patch.object(Configuration, 'get')
-    def test_factory(self, mock_get):
-        mycroft.stt.STTApi = MagicMock()
-        config = base_config()
-        config.merge(
-            {
-                'stt': {
-                    'module': 'mycroft',
-                    'wit': {'credential': {'token': 'FOOBAR'}},
-                    'google': {'credential': {'token': 'FOOBAR'}},
-                    'bing': {'credential': {'token': 'FOOBAR'}},
-                    'houndify': {'credential': {'client_id': 'FOO',
-                                                "client_key": 'BAR'}},
-                    'google_cloud': {
-                        'credential': {
-                            'json': {}
-                        }
-                    },
-                    'ibm': {
-                        'credential': {
-                            'token': 'FOOBAR'
-                        },
-                        'url': 'https://test.com/'
-                    },
-                    'kaldi': {'uri': 'https://test.com'},
-                    'mycroft': {'uri': 'https://test.com'}
-                },
-                'lang': 'en-US'
-            })
-        mock_get.return_value = config
+    def test_factory(self):
+        config = {'module': 'mycroft',
+                  'mycroft': {'uri': 'https://test.com'}}
+        stt = mycroft.listener.stt.STTFactory.create(config)
+        self.assertEqual(type(stt), mycroft.listener.stt.MycroftSTT)
 
-        stt = mycroft.stt.STTFactory.create()
-        self.assertEqual(type(stt), mycroft.stt.MycroftSTT)
+        config = {'stt': config}
+        stt = mycroft.listener.stt.STTFactory.create(config)
+        self.assertEqual(type(stt), mycroft.listener.stt.MycroftSTT)
 
-        config['stt']['module'] = 'google'
-        stt = mycroft.stt.STTFactory.create()
-        self.assertEqual(type(stt), mycroft.stt.GoogleSTT)
+    @patch.dict(Configuration._Configuration__patch, STT_CONFIG)
+    def test_factory_from_config(self):
+        mycroft.listener.stt.STTApi = MagicMock()
+        stt = mycroft.listener.stt.STTFactory.create()
+        self.assertEqual(type(stt), mycroft.listener.stt.MycroftSTT)
 
-        config['stt']['module'] = 'google_cloud'
-        stt = mycroft.stt.STTFactory.create()
-        self.assertEqual(type(stt), mycroft.stt.GoogleCloudSTT)
-
-        config['stt']['module'] = 'ibm'
-        stt = mycroft.stt.STTFactory.create()
-        self.assertEqual(type(stt), mycroft.stt.IBMSTT)
-
-        config['stt']['module'] = 'kaldi'
-        stt = mycroft.stt.STTFactory.create()
-        self.assertEqual(type(stt), mycroft.stt.KaldiSTT)
-
-        config['stt']['module'] = 'wit'
-        stt = mycroft.stt.STTFactory.create()
-        self.assertEqual(type(stt), mycroft.stt.WITSTT)
-
-    @patch.object(Configuration, 'get')
-    def test_stt(self, mock_get):
-        mycroft.stt.STTApi = MagicMock()
-        config = base_config()
-        config.merge(
-            {
-                'stt': {
-                    'module': 'mycroft',
-                    'mycroft': {'uri': 'https://test.com'}
-                },
-                'lang': 'en-US'
-            })
-        mock_get.return_value = config
-
-        class TestSTT(mycroft.stt.STT):
-            def execute(self, audio, language=None):
-                pass
-
-        stt = TestSTT()
-        self.assertEqual(stt.lang, 'en-US')
-        config['lang'] = 'en-us'
-
-        # Check that second part of lang gets capitalized
-        stt = TestSTT()
-        self.assertEqual(stt.lang, 'en-US')
-
-        # Check that it works with two letters
-        config['lang'] = 'sv'
-        stt = TestSTT()
-        self.assertEqual(stt.lang, 'sv')
-
-    @patch.object(Configuration, 'get')
-    def test_mycroft_stt(self, mock_get):
-        mycroft.stt.STTApi = MagicMock()
-        config = base_config()
-        config.merge(
-            {
-                'stt': {
-                    'module': 'mycroft',
-                    'mycroft': {'uri': 'https://test.com'}
-                },
-                'lang': 'en-US'
-            })
-        mock_get.return_value = config
-
-        stt = mycroft.stt.MycroftSTT()
+    @patch.dict(Configuration._Configuration__patch, STT_CONFIG)
+    def test_mycroft_stt(self,):
+        mycroft.listener.stt.STTApi = MagicMock()
+        stt = mycroft.listener.stt.MycroftSTT()
         audio = MagicMock()
         stt.execute(audio, 'en-us')
-        self.assertTrue(mycroft.stt.STTApi.called)
+        self.assertTrue(mycroft.listener.stt.STTApi.called)
 
-    @patch.object(Configuration, 'get')
-    def test_google_stt(self, mock_get):
-        mycroft.stt.Recognizer = MagicMock
-        config = base_config()
-        config.merge(
-            {
-                'stt': {
-                    'module': 'google',
-                    'google': {'credential': {'token': 'FOOBAR'}},
-                },
-                'lang': 'en-US'
-            })
-        mock_get.return_value = config
+    @patch.dict(Configuration._Configuration__patch, STT_CONFIG)
+    def test_fallback_stt(self):
+        # check class matches
+        fallback_stt = RecognizerLoop.get_fallback_stt()
+        self.assertEqual(fallback_stt, VoskKaldiSTT)
 
-        audio = MagicMock()
-        stt = mycroft.stt.GoogleSTT()
-        stt.execute(audio)
-        self.assertTrue(stt.recognizer.recognize_google.called)
+    @patch.dict(Configuration._Configuration__patch, STT_INVALID_FB_CONFIG)
+    @patch.object(LOG, 'error')
+    @patch.object(LOG, 'warning')
+    def test_invalid_fallback_stt(self, mock_warn, mock_error):
+        fallback_stt = RecognizerLoop.get_fallback_stt()
+        self.assertIsNone(fallback_stt)
+        mock_warn.assert_called_with("Could not find plugin: invalid")
+        mock_error.assert_called_with("Failed to create fallback STT")
 
-    @patch.object(Configuration, 'get')
-    def test_google_cloud_stt(self, mock_get):
-        mycroft.stt.Recognizer = MagicMock
-        config = base_config()
-        config.merge(
-            {
-                'stt': {
-                    'module': 'google_cloud',
-                    'google_cloud': {
-                        'credential': {
-                            'json': {}
-                        }
-                    },
-                },
-                'lang': 'en-US'
-            })
-        mock_get.return_value = config
+    @patch.dict(Configuration._Configuration__patch, STT_NO_FB_CONFIG)
+    @patch.object(LOG, 'error')
+    @patch.object(LOG, 'warning')
+    def test_fallback_stt_not_set(self,  mock_warn, mock_error):
+        fallback_stt = RecognizerLoop.get_fallback_stt()
+        self.assertIsNone(fallback_stt)
+        mock_warn.assert_called_with("No fallback STT configured")
+        mock_error.assert_called_with("Failed to create fallback STT")
 
-        audio = MagicMock()
-        stt = mycroft.stt.GoogleCloudSTT()
-        stt.execute(audio)
-        self.assertTrue(stt.recognizer.recognize_google_cloud.called)
-
-    @patch('mycroft.stt.post')
-    @patch.object(Configuration, 'get')
-    def test_ibm_stt(self, mock_get, mock_post):
-        import json
-
-        config = base_config()
-        config.merge(
-            {
-                'stt': {
-                    'module': 'ibm',
-                    'ibm': {
-                        'credential': {
-                            'token': 'FOOBAR'
-                        },
-                        'url': 'https://test.com'
-                    },
-                },
-                'lang': 'en-US'
-            }
-        )
-        mock_get.return_value = config
-
-        requests_object = MagicMock()
-        requests_object.status_code = 200
-        requests_object.text = json.dumps({
-            'results': [
-                {
-                    'alternatives': [
-                        {
-                            'confidence': 0.96,
-                            'transcript': 'sample response'
-                        }
-                    ],
-                    'final': True
-                }
-            ],
-            'result_index': 0
-        })
-        mock_post.return_value = requests_object
-
-        audio = MagicMock()
-        audio.sample_rate = 16000
-
-        stt = mycroft.stt.IBMSTT()
-        stt.execute(audio)
-
-        test_url_base = 'https://test.com/v1/recognize'
-        mock_post.assert_called_with(test_url_base,
-                                     auth=('apikey', 'FOOBAR'),
-                                     headers={
-                                         'Content-Type': 'audio/x-flac',
-                                         'X-Watson-Learning-Opt-Out': 'true'
-                                     },
-                                     data=audio.get_flac_data(),
-                                     params={
-                                         'model': 'en-US_BroadbandModel',
-                                         'profanity_filter': 'false'
-                                     })
-
-    @patch.object(Configuration, 'get')
-    def test_wit_stt(self, mock_get):
-        mycroft.stt.Recognizer = MagicMock
-        config = base_config()
-        config.merge(
-            {
-                'stt': {
-                    'module': 'wit',
-                    'wit': {'credential': {'token': 'FOOBAR'}},
-                },
-                'lang': 'en-US'
-            })
-        mock_get.return_value = config
-
-        audio = MagicMock()
-        stt = mycroft.stt.WITSTT()
-        stt.execute(audio)
-        self.assertTrue(stt.recognizer.recognize_wit.called)
-
-    @patch('mycroft.stt.post')
-    @patch.object(Configuration, 'get')
-    def test_kaldi_stt(self, mock_get, mock_post):
-        mycroft.stt.Recognizer = MagicMock
-        config = base_config()
-        config.merge(
-            {
-                'stt': {
-                    'module': 'kaldi',
-                    'kaldi': {'uri': 'https://test.com'},
-                },
-                'lang': 'en-US'
-            })
-        mock_get.return_value = config
-
-        kaldiResponse = MagicMock()
-        kaldiResponse.json.return_value = {
-                'hypotheses': [{'utterance': '     [noise]     text'},
-                               {'utterance': '     asdf'}]
-        }
-        mock_post.return_value = kaldiResponse
-        audio = MagicMock()
-        stt = mycroft.stt.KaldiSTT()
-        self.assertEqual(stt.execute(audio), 'text')
-
-    @patch.object(Configuration, 'get')
-    def test_bing_stt(self, mock_get):
-        mycroft.stt.Recognizer = MagicMock
-        config = base_config()
-        config.merge(
-            {
-                'stt': {
-                    'module': 'bing',
-                    'bing': {'credential': {'token': 'FOOBAR'}},
-                },
-                'lang': 'en-US'
-            })
-        mock_get.return_value = config
-
-        audio = MagicMock()
-        stt = mycroft.stt.BingSTT()
-        stt.execute(audio)
-        self.assertTrue(stt.recognizer.recognize_bing.called)
-
-    @patch.object(Configuration, 'get')
-    def test_houndify_stt(self, mock_get):
-        mycroft.stt.Recognizer = MagicMock
-        config = base_config()
-        config.merge(
-            {
-                'stt': {
-                    'module': 'houndify',
-                    'houndify': {'credential': {
-                        'client_id': 'FOO',
-                        'client_key': "BAR"}}
-                },
-                'lang': 'en-US'
-            })
-        mock_get.return_value = config
-
-        audio = MagicMock()
-        stt = mycroft.stt.HoundifySTT()
-        stt.execute(audio)
-        self.assertTrue(stt.recognizer.recognize_houndify.called)

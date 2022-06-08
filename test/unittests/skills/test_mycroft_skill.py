@@ -13,23 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import json
 import sys
 import unittest
-
-from unittest.mock import MagicMock, patch
-from adapt.intent import IntentBuilder
+from datetime import datetime
 from os.path import join, dirname, abspath
 from re import error
-from datetime import datetime
-import json
+from unittest.mock import MagicMock, patch
+
+from adapt.intent import IntentBuilder
 
 from mycroft.configuration import Configuration
 from mycroft.messagebus.message import Message
-from mycroft.skills.skill_data import (load_regex_from_file, load_regex,
-                                       load_vocabulary, read_vocab_file)
 from mycroft.skills.core import MycroftSkill, resting_screen_handler
 from mycroft.skills.intent_service import open_intent_envelope
-
+from mycroft.skills.skill_data import (load_regex_from_file, load_regex,
+                                       load_vocabulary, read_vocab_file)
 from test.util import base_config
 
 BASE_CONF = base_config()
@@ -83,17 +82,6 @@ class TestMycroftSkill(unittest.TestCase):
 
     def setUp(self):
         self.emitter.reset()
-        self.local_settings_mock = self._mock_local_settings()
-
-    def _mock_local_settings(self):
-        local_settings_patch = patch(
-            'mycroft.skills.mycroft_skill.mycroft_skill.get_local_settings'
-        )
-        self.addCleanup(local_settings_patch.stop)
-        local_settings_mock = local_settings_patch.start()
-        local_settings_mock.return_value = True
-
-        return local_settings_mock
 
     def check_vocab(self, filename, results=None):
         results = results or {}
@@ -138,10 +126,6 @@ class TestMycroftSkill(unittest.TestCase):
     def test_load_regex_from_file_none(self):
         self.check_regex_from_file('invalid/none.rx')
 
-    def test_load_regex_from_file_invalid(self):
-        with self.assertRaises(error):
-            self.check_regex_from_file('invalid/invalid.rx')
-
     def test_load_regex_from_file_does_not_exist(self):
         with self.assertRaises(IOError):
             self.check_regex_from_file('does_not_exist.rx')
@@ -175,12 +159,6 @@ class TestMycroftSkill(unittest.TestCase):
                                         'valid/multiplealias.voc'),
                                    [['chair', 'chairs'], ['table', 'tables']])
 
-    def test_load_vocab_from_file_does_not_exist(self):
-        try:
-            self.check_read_vocab_file('does_not_exist.voc')
-        except IOError as e:
-            self.assertEqual(e.strerror, 'No such file or directory')
-
     def test_load_vocab_full(self):
         self.check_vocab(join(self.vocab_path, 'valid'),
                          {
@@ -189,7 +167,7 @@ class TestMycroftSkill(unittest.TestCase):
                              'Amultiple': [['animal'], ['animals']],
                              'Amultiplealias': [['chair', 'chairs'],
                                                 ['table', 'tables']]
-                        })
+                         })
 
     def test_load_vocab_empty(self):
         self.check_vocab(join(dirname(__file__), 'empty_dir'))
@@ -232,42 +210,46 @@ class TestMycroftSkill(unittest.TestCase):
     def test_register_intent(self):
         # Test register Intent object
         s = SimpleSkill1()
-        s.bind(self.emitter)
-        s.initialize()
+        s._startup(self.emitter, "A")
         expected = [{'at_least_one': [],
                      'name': 'A:a',
                      'optional': [],
                      'requires': [('AKeyword', 'AKeyword')]}]
-        self.check_register_intent(expected)
+        msg_data = self.emitter.get_results()
+        self.assertTrue(expected[0] in msg_data)
+        self.emitter.reset()
 
         # Test register IntentBuilder object
         s = SimpleSkill2()
-        s.bind(self.emitter)
-        s.initialize()
+        s._startup(self.emitter, "A")
         expected = [{'at_least_one': [],
                      'name': 'A:a',
                      'optional': [],
                      'requires': [('AKeyword', 'AKeyword')]}]
 
-        self.check_register_intent(expected)
+        msg_data = self.emitter.get_results()
+        self.assertTrue(expected[0] in msg_data)
+        self.emitter.reset()
 
         # Test register IntentBuilder object
         with self.assertRaises(ValueError):
             s = SimpleSkill3()
-            s.bind(self.emitter)
-            s.initialize()
+            s._startup(self.emitter, "A")
 
     def test_enable_disable_intent(self):
         """Test disable/enable intent."""
         # Setup basic test
         s = SimpleSkill1()
-        s.bind(self.emitter)
-        s.initialize()
+        s._startup(self.emitter, "A")
+
+        # check that intent was registered
         expected = [{'at_least_one': [],
                      'name': 'A:a',
                      'optional': [],
                      'requires': [('AKeyword', 'AKeyword')]}]
-        self.check_register_intent(expected)
+        msg_data = self.emitter.get_results()
+        self.assertTrue(expected[0] in msg_data)
+        self.emitter.reset()
 
         # Test disable/enable cycle
         s.disable_intent('a')
@@ -279,13 +261,14 @@ class TestMycroftSkill(unittest.TestCase):
         """Test disable/enable intent."""
         # Setup basic test
         s = SimpleSkill1()
-        s.bind(self.emitter)
-        s.initialize()
+        s._startup(self.emitter, "A")
         expected = [{'at_least_one': [],
                      'name': 'A:a',
                      'optional': [],
                      'requires': [('AKeyword', 'AKeyword')]}]
-        self.check_register_intent(expected)
+        msg_data = self.emitter.get_results()
+        self.assertTrue(expected[0] in msg_data)
+        self.emitter.reset()
 
         # Test disable/enable cycle
         msg = Message('test.msg', data={'intent_name': 'a'})
@@ -298,17 +281,24 @@ class TestMycroftSkill(unittest.TestCase):
         """Test disable/enable intent."""
         # Setup basic test
         s = SimpleSkill1()
-        s.bind(self.emitter)
-        s.initialize()
+        s._startup(self.emitter, "A")
 
         # Normal vocaubulary
         self.emitter.reset()
-        expected = [{'start': 'hello', 'end': 'AHelloKeyword'}]
+        expected = [
+            {
+                'start': 'hello',
+                'end': 'AHelloKeyword',
+                'entity_value': 'hello',
+                'lang': 'en-us',
+                'entity_type': 'AHelloKeyword'
+            }
+        ]
         s.register_vocabulary('hello', 'HelloKeyword')
         self.check_register_vocabulary(expected)
         # Regex
         s.register_regex('weird (?P<Weird>.+) stuff')
-        expected = [{'regex': 'weird (?P<AWeird>.+) stuff'}]
+        expected = [{'lang': 'en-us', 'regex': 'weird (?P<AWeird>.+) stuff'}]
         self.check_register_vocabulary(expected)
 
     def check_register_object_file(self, types_list, result_list):
@@ -328,8 +318,7 @@ class TestMycroftSkill(unittest.TestCase):
 
     def _test_intent_file(self, s):
         s.root_dir = abspath(join(dirname(__file__), 'intent_file'))
-        s.bind(self.emitter)
-        s.initialize()
+        s._startup(self.emitter, "A")
 
         expected_types = [
             'padatious:register_intent',
@@ -340,11 +329,13 @@ class TestMycroftSkill(unittest.TestCase):
             {
                 'file_name': join(dirname(__file__), 'intent_file',
                                   'vocab', 'en-us', 'test.intent'),
+                'lang': 'en-us',
                 'name': str(s.skill_id) + ':test.intent'
             },
             {
                 'file_name': join(dirname(__file__), 'intent_file',
                                   'vocab', 'en-us', 'test_ent.entity'),
+                'lang': 'en-us',
                 'name': str(s.skill_id) + ':test_ent'
             }
         ]
@@ -362,19 +353,18 @@ class TestMycroftSkill(unittest.TestCase):
         sys.path.append(abspath(dirname(__file__)))
         SimpleSkill5 = __import__('decorator_test_skill').TestSkill
         s = SimpleSkill5()
-        s.skill_id = 'A'
-        s.bind(self.emitter)
         s.root_dir = abspath(join(dirname(__file__), 'intent_file'))
-        s.initialize()
-        s._register_decorated()
+        s._startup(self.emitter, "A")
+
         expected = [{'at_least_one': [],
                      'name': 'A:a',
                      'optional': [],
                      'requires': [('AKeyword', 'AKeyword')]},
                     {
-                     'file_name': join(dirname(__file__), 'intent_file',
-                                       'vocab', 'en-us', 'test.intent'),
-                     'name': str(s.skill_id) + ':test.intent'}]
+                        'file_name': join(dirname(__file__), 'intent_file',
+                                          'vocab', 'en-us', 'test.intent'),
+                        'lang': 'en-us',
+                        'name': str(s.skill_id) + ':test.intent'}]
 
         self.check_register_decorators(expected)
         # Restore sys.path
@@ -382,7 +372,7 @@ class TestMycroftSkill(unittest.TestCase):
 
     def test_failing_set_context(self):
         s = SimpleSkill1()
-        s.bind(self.emitter)
+        s._startup(self.emitter, "A")
         with self.assertRaises(ValueError):
             s.set_context(1)
         with self.assertRaises(ValueError):
@@ -399,7 +389,8 @@ class TestMycroftSkill(unittest.TestCase):
             self.emitter.reset()
 
         s = SimpleSkill1()
-        s.bind(self.emitter)
+        s._startup(self.emitter, "A")
+        self.emitter.reset()
         # No context content
         s.set_context('TurtlePower')
         expected = [{'context': 'ATurtlePower', 'origin': '', 'word': ''}]
@@ -420,7 +411,7 @@ class TestMycroftSkill(unittest.TestCase):
 
     def test_failing_remove_context(self):
         s = SimpleSkill1()
-        s.bind(self.emitter)
+        s._startup(self.emitter, "A")
         with self.assertRaises(ValueError):
             s.remove_context(1)
 
@@ -433,12 +424,13 @@ class TestMycroftSkill(unittest.TestCase):
             self.emitter.reset()
 
         s = SimpleSkill1()
-        s.bind(self.emitter)
+        s._startup(self.emitter, "A")
+        self.emitter.reset()
         s.remove_context('Donatello')
         expected = [{'context': 'ADonatello'}]
         check_remove_context(expected)
 
-    @patch.dict(Configuration._Configuration__config, BASE_CONF)
+    @patch.dict(Configuration._Configuration__patch, BASE_CONF)
     def test_skill_location(self):
         s = SimpleSkill1()
         self.assertEqual(s.location, BASE_CONF.get('location'))
@@ -447,22 +439,22 @@ class TestMycroftSkill(unittest.TestCase):
         self.assertEqual(s.location_timezone,
                          BASE_CONF['location']['timezone']['code'])
 
-    @patch.dict(Configuration._Configuration__config, BASE_CONF)
+    @patch.dict(Configuration._Configuration__patch, BASE_CONF)
     def test_add_event(self):
         emitter = MagicMock()
         s = SimpleSkill1()
-        s.bind(emitter)
+        s._startup(emitter, "A")
         s.add_event('handler1', s.handler)
         # Check that the handler was registered with the emitter
         self.assertEqual(emitter.on.call_args[0][0], 'handler1')
         # Check that the handler was stored in the skill
         self.assertTrue('handler1' in [e[0] for e in s.events])
 
-    @patch.dict(Configuration._Configuration__config, BASE_CONF)
+    @patch.dict(Configuration._Configuration__patch, BASE_CONF)
     def test_remove_event(self):
         emitter = MagicMock()
         s = SimpleSkill1()
-        s.bind(emitter)
+        s._startup(emitter, "A")
         s.add_event('handler1', s.handler)
         self.assertTrue('handler1' in [e[0] for e in s.events])
         # Remove event handler
@@ -473,11 +465,11 @@ class TestMycroftSkill(unittest.TestCase):
         self.assertEqual(emitter.remove_all_listeners.call_args[0][0],
                          'handler1')
 
-    @patch.dict(Configuration._Configuration__config, BASE_CONF)
+    @patch.dict(Configuration._Configuration__patch, BASE_CONF)
     def test_add_scheduled_event(self):
         emitter = MagicMock()
         s = SimpleSkill1()
-        s.bind(emitter)
+        s._startup(emitter, "A")
 
         s.schedule_event(s.handler, datetime.now(), name='datetime_handler')
         # Check that the handler was registered with the emitter
@@ -497,11 +489,11 @@ class TestMycroftSkill(unittest.TestCase):
         sched_events = [e[0] for e in s.event_scheduler.events]
         self.assertTrue('A:float_handler' in sched_events)
 
-    @patch.dict(Configuration._Configuration__config, BASE_CONF)
+    @patch.dict(Configuration._Configuration__patch, BASE_CONF)
     def test_remove_scheduled_event(self):
         emitter = MagicMock()
         s = SimpleSkill1()
-        s.bind(emitter)
+        s._startup(emitter, "A")
         s.schedule_event(s.handler, datetime.now(), name='sched_handler1')
         # Check that the handler was registered with the emitter
         events = [e[0] for e in s.event_scheduler.events]
@@ -514,13 +506,13 @@ class TestMycroftSkill(unittest.TestCase):
         events = [e[0] for e in s.event_scheduler.events]
         self.assertTrue('A:sched_handler1' not in events)
 
-    @patch.dict(Configuration._Configuration__config, BASE_CONF)
+    @patch.dict(Configuration._Configuration__patch, BASE_CONF)
     def test_run_scheduled_event(self):
         emitter = MagicMock()
         s = SimpleSkill1()
         with patch.object(s, '_settings',
                           create=True, value=MagicMock()):
-            s.bind(emitter)
+            s._startup(emitter, "A")
             s.schedule_event(s.handler, datetime.now(), name='sched_handler1')
             # Check that the handler was registered with the emitter
             emitter.once.call_args[0][1](Message('message'))
@@ -606,19 +598,8 @@ class TestMycroftSkill(unittest.TestCase):
         self.assertEqual(template,
                          ['Aber setzen sie sich herr test framework'])
 
-        # Check fallback to english
-        lst = s.translate_list('not_in_german')
-        self.assertEqual(lst, ['not', 'in', 'German'])
-
         # Restore lang to en-us
         s.config_core['lang'] = 'en-us'
-
-    def test_speak_dialog_render_not_initialized(self):
-        """Test that non-initialized dialog_renderer won't raise an error."""
-        s = SimpleSkill1()
-        s.bind(self.emitter)
-        s.dialog_renderer = None
-        s.speak_dialog(key='key')
 
 
 class _TestSkill(MycroftSkill):
@@ -633,6 +614,7 @@ class SimpleSkill1(_TestSkill):
         self.handler_run = False
 
     """ Test skill for normal intent builder syntax """
+
     def initialize(self):
         i = IntentBuilder('a').require('Keyword').build()
         self.register_intent(i, self.handler)

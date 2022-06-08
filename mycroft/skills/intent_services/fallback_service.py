@@ -14,20 +14,21 @@
 #
 """Intent service for Mycroft's fallback system."""
 from collections import namedtuple
-from .base import IntentMatch
+from mycroft.skills.intent_services.base import IntentMatch
 
 FallbackRange = namedtuple('FallbackRange', ['start', 'stop'])
 
 
 class FallbackService:
     """Intent Service handling fallback skills."""
+
     def __init__(self, bus):
         self.bus = bus
 
     def _fallback_range(self, utterances, lang, message, fb_range):
         """Send fallback request for a specified priority range.
 
-        Arguments:
+        Args:
             utterances (list): List of tuples,
                                utterances and normalized version
             lang (str): Langauge code
